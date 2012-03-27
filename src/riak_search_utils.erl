@@ -24,7 +24,8 @@
     ets_keys/1,
     consult/1,
     ptransform/2,
-    err_msg/1
+    err_msg/1,
+    repair_filter/3
 ]).
 
 -include("riak_search.hrl").
@@ -260,6 +261,40 @@ err_msg({error, fl_id_with_sort, UniqKey}) ->
     ?FMT("cannot sort when fl=~s~n", [UniqKey]);
 err_msg(Error) ->
     ?FMT("Unable to parse request: ~p", [Error]).
+
+%% @doc Given a `Target' partition, a `Ring', and a `NVal' generate a
+%% `Filter' fun to use during partition repair.
+-spec repair_filter(non_neg_integer(), chash:chash(), pos_integer()) ->
+                           Filter::function().
+repair_filter(Target, Ring, NVal) ->
+    Predecessors = chash:predecessors(<<Target:160/integer>>, Ring, NVal+1),
+    [{FirstIdx, Node}|T] = Predecessors,
+    Predecessors2 = [{FirstIdx-1, Node}|T],
+    Predecessors3 = [<<I:160/integer>> || {I,_} <- Predecessors2],
+    {A,B} = lists:splitwith(fun(E) -> E > <<0:160/integer>> end, Predecessors3),
+    case B of
+        [] ->
+            %% In this case there is no "wrap" around the end of the
+            %% ring so the range check it simply an inclusive
+            %% inbetween.
+            A2 = lists:sort(A),
+            GTE = hd(A2),
+            LTE = lists:last(A2),
+            fun(K) ->
+                    K >= GTE andalso K =< LTE
+            end;
+        _ ->
+            %% In this case there is a "wrap" around the end of the
+            %% ring.  Either the key is greater than or equal the
+            %% largest or smaller than or equal to the smallest.
+            LTE = hd(A),
+            %% know first element of B is 0
+            B2 = tl(B),
+            GTE = lists:last(B2),
+            fun(K) ->
+                    K >= GTE orelse K =< LTE
+            end
+    end.
 
 -ifdef(TEST).
 

@@ -268,8 +268,8 @@ err_msg(Error) ->
                            Filter::function().
 repair_filter(Target, Ring, NVal) ->
     Predecessors = chash:predecessors(<<Target:160/integer>>, Ring, NVal+1),
-    [{FirstIdx, Node}|T] = Predecessors,
-    Predecessors2 = [{FirstIdx-1, Node}|T],
+    [{FirstIdx, Node}|Rest] = Predecessors,
+    Predecessors2 = [{FirstIdx-1, Node}|Rest],
     Predecessors3 = [<<I:160/integer>> || {I,_} <- Predecessors2],
     {A,B} = lists:splitwith(fun(E) -> E > <<0:160/integer>> end, Predecessors3),
     case B of
@@ -280,8 +280,9 @@ repair_filter(Target, Ring, NVal) ->
             A2 = lists:sort(A),
             GTE = hd(A2),
             LTE = lists:last(A2),
-            fun(K) ->
-                    K >= GTE andalso K =< LTE
+            fun({I, {F, T}}) ->
+                    Hash = riak_search_ring_utils:calc_partition(I, F, T),
+                    Hash >= GTE andalso Hash =< LTE
             end;
         _ ->
             %% In this case there is a "wrap" around the end of the
@@ -291,8 +292,9 @@ repair_filter(Target, Ring, NVal) ->
             %% know first element of B is 0
             B2 = tl(B),
             GTE = lists:last(B2),
-            fun(K) ->
-                    K >= GTE orelse K =< LTE
+            fun({I, {F, T}}) ->
+                    Hash = riak_search_ring_utils:calc_partition(I, F, T),
+                    Hash >= GTE orelse Hash =< LTE
             end
     end.
 

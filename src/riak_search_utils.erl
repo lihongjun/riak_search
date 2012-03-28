@@ -262,11 +262,48 @@ err_msg({error, fl_id_with_sort, UniqKey}) ->
 err_msg(Error) ->
     ?FMT("Unable to parse request: ~p", [Error]).
 
-%% @doc Given a `Target' partition, a `Ring', and a `NVal' generate a
-%% `Filter' fun to use during partition repair.
--spec repair_filter(non_neg_integer(), chash:chash(), pos_integer()) ->
+%% @doc Given a `Target' partition, a `Ring' generate a `Filter' fun
+%% to use during partition repair.  The `NValMap' is a map from index
+%% name to n_val and is needed to determine which hash range a key
+%% must fall into to be included.  Only non-default schemas will be
+%% included in the map.
+-spec repair_filter(non_neg_integer(), chash:chash(),
+                    [{index(), pos_integer()}]) ->
                            Filter::function().
-repair_filter(Target, Ring, NVal) ->
+repair_filter(Target, Ring, NValMap) ->
+    RangeMap = gen_range_map(Target, Ring, NValMap),
+    %% TODO hardcoded default n_val here
+    Default = gen_range(Target, Ring, 3),
+    RangeFun = gen_range_fun(RangeMap, Default),
+    fun({I, {F, T}}) ->
+            Hash = riak_search_ring_utils:calc_partition(I, F, T),
+            case RangeFun(I) of
+                {_, {nowrap, GTE, LTE}} ->
+                    Hash >= GTE andalso Hash =< LTE;
+                {_, {wrap, GTE, LTE}} ->
+                    Hash >= GTE orelse Hash =< LTE
+            end
+    end.
+
+gen_range_fun(RangeMap, Default) ->
+    fun(I) ->
+            case lists:keyfind(I, 1, RangeMap) of
+                false -> Default;
+                Val -> Val
+            end
+    end.
+
+%% @doc Determine the hash range a key must fall into for a replica to
+%% be included on the `Target' partition based on it's index/bucket's
+%% n_val.
+-spec gen_range_map(non_neg_integer(), chash:chash(), [{index(), pos_integer()}]) ->
+                           [{index(), {nowrap | wrap,
+                                       GTE::non_neg_integer(),
+                                       LTE::non_neg_integer()}}].
+gen_range_map(Target, Ring, NValMap) ->
+    [{I, gen_range(Target, Ring, N)} || {I, N} <- NValMap, N > 1].
+
+gen_range(Target, Ring, NVal) ->
     Predecessors = chash:predecessors(<<Target:160/integer>>, Ring, NVal+1),
     [{FirstIdx, Node}|Rest] = Predecessors,
     Predecessors2 = [{FirstIdx-1, Node}|Rest],
@@ -280,10 +317,7 @@ repair_filter(Target, Ring, NVal) ->
             A2 = lists:sort(A),
             GTE = hd(A2),
             LTE = lists:last(A2),
-            fun({I, {F, T}}) ->
-                    Hash = riak_search_ring_utils:calc_partition(I, F, T),
-                    Hash >= GTE andalso Hash =< LTE
-            end;
+            {nowrap, GTE, LTE};
         _ ->
             %% In this case there is a "wrap" around the end of the
             %% ring.  Either the key is greater than or equal the
@@ -292,11 +326,9 @@ repair_filter(Target, Ring, NVal) ->
             %% know first element of B is 0
             B2 = tl(B),
             GTE = lists:last(B2),
-            fun({I, {F, T}}) ->
-                    Hash = riak_search_ring_utils:calc_partition(I, F, T),
-                    Hash >= GTE orelse Hash =< LTE
-            end
+            {wrap, GTE, LTE}
     end.
+
 
 -ifdef(TEST).
 

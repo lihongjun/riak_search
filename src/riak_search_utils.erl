@@ -25,6 +25,8 @@
     consult/1,
     ptransform/2,
     err_msg/1,
+    repair/1,
+    repair/4,
     repair_filter/3
 ]).
 
@@ -262,6 +264,40 @@ err_msg({error, fl_id_with_sort, UniqKey}) ->
 err_msg(Error) ->
     ?FMT("Unable to parse request: ~p", [Error]).
 
+%% @doc Initiate a repair on `Partition'.  Don't worry about success
+%% for now, just fire and forget.
+%%
+%% TODO: Only use source partitions directly adjacent to target
+%% partition.  Can only repair all data is n_val is minimum of 2.  In
+%% the case where all n_vals are > 2 then it is possible to repair the
+%% partition with sources besides immediately adjacent.  Punting on
+%% that for now.
+-spec repair(non_neg_integer()) -> ok.
+repair(Partition) ->
+    %% TODO: should I get raw or updated ring?
+    {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
+    %% TODO: either add ability to extract real ring or add funs to riak_core_ring
+    CH = element(4, Ring),
+    NValMap = [{S:name(), S:n_val()} ||
+                  S <- riak_search_config:get_all_schemas()],
+    [_, {PMinusOne,PMinusOneNode}] = chash:predecessors(<<Partition:160/integer>>, CH, 2),
+    [{PPlusOne,PPlusOneNode}] = chash:successors(<<Partition:160/integer>>, CH, 1),
+    rpc:call(PMinusOneNode, ?MODULE, repair, [Ring, PMinusOne, Partition, NValMap]),
+    rpc:call(PPlusOneNode, ?MODULE, repair, [Ring, PPlusOne, Partition, NValMap]).
+
+repair(Ring, Source, Target, NValMap) ->
+    %% TODO: either add ability to extract real ring or add funs to riak_core_ring
+    CH = element(4, Ring),
+    Filter = riak_search_utils:repair_filter(Target, CH, NValMap),
+    TargetNode = riak_core_ring:index_owner(Ring, Target),
+    {ok, Pid} = riak_core_vnode_manager:get_vnode_pid(Source, riak_search_vnode),
+    %% TODO go thru handoff manager
+    {ok, _} = riak_core_handoff_sender_sup:start_sender(TargetNode, riak_search_vnode,
+                                                        {Source, Target}, Filter,
+                                                        Pid),
+    ok.
+
+
 %% @doc Given a `Target' partition, a `Ring' generate a `Filter' fun
 %% to use during partition repair.  The `NValMap' is a map from index
 %% name to n_val and is needed to determine which hash range a key
@@ -277,10 +313,12 @@ repair_filter(Target, Ring, NValMap) ->
     RangeFun = gen_range_fun(RangeMap, Default),
     fun({I, {F, T}}) ->
             Hash = riak_search_ring_utils:calc_partition(I, F, T),
+            lager:info("filtering ~p/~p/~p against range ~p",
+                       [I, F, T, RangeFun(I)]),
             case RangeFun(I) of
-                {_, {nowrap, GTE, LTE}} ->
+                {nowrap, GTE, LTE} ->
                     Hash >= GTE andalso Hash =< LTE;
-                {_, {wrap, GTE, LTE}} ->
+                {wrap, GTE, LTE} ->
                     Hash >= GTE orelse Hash =< LTE
             end
     end.
@@ -289,7 +327,7 @@ gen_range_fun(RangeMap, Default) ->
     fun(I) ->
             case lists:keyfind(I, 1, RangeMap) of
                 false -> Default;
-                Val -> Val
+                {_, Val} -> Val
             end
     end.
 

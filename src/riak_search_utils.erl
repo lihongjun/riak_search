@@ -352,21 +352,46 @@ gen_range(Target, Ring, NVal) ->
             %% In this case there is no "wrap" around the end of the
             %% ring so the range check it simply an inclusive
             %% inbetween.
-            A2 = lists:sort(A),
-            GTE = hd(A2),
-            LTE = lists:last(A2),
-            {nowrap, GTE, LTE};
+            make_nowrap(A);
+
+        [<<0:160/integer>>] ->
+            %% In this case the 0th partition is first so no wrap
+            %% actually occurred.
+            make_nowrap(A ++ B);
+
         _ ->
             %% In this case there is a "wrap" around the end of the
             %% ring.  Either the key is greater than or equal the
             %% largest or smaller than or equal to the smallest.
-            LTE = hd(A),
-            %% know first element of B is 0
-            B2 = tl(B),
-            GTE = lists:last(B2),
-            {wrap, GTE, LTE}
+            make_wrap(A, B)
     end.
 
+%% @private
+%%
+%% @doc Make the `nowrap' tuple representing the range a key hash must
+%% fall into.
+-spec make_nowrap(any()) -> {nowrap, GTE::binary(), LTE::binary()}.
+make_nowrap(RingSlice) ->
+    Slice2 = lists:sort(RingSlice),
+    GTE = hd(Slice2),
+    LTE = lists:last(Slice2),
+    {nowrap, GTE, LTE}.
+
+%% @private
+%%
+%% @doc Make `wrap' tuple representing the two ranges, relative to 0,
+%% that a key hash must fall into.
+%%
+%% `RingSliceAfter' contains entries after the wrap around the 0th
+%% partition.  `RingSliceBefore' are entries before wrap and the
+%% including the wrap at partition 0.
+-spec make_wrap(any(), any()) -> {wrap, GTE::binary(), LTE::binary()}.
+make_wrap(RingSliceAfter, RingSliceBefore) ->
+            LTE = hd(RingSliceAfter),
+            %% know first element of RingSliceBefore is 0
+            Before2 = tl(RingSliceBefore),
+            GTE = lists:last(Before2),
+            {wrap, GTE, LTE}.
 
 -ifdef(TEST).
 
